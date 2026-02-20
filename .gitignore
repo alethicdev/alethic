@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.eggs
+
+# Testing / Tooling
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data / Runtime
+*.db
+results/
+
+# Environment
+.env
+.venv/
+venv/
+
+# Project scratch
+delete-later.md
+tasks_archive/

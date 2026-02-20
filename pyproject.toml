@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alethic-kernel"
+version = "0.1.0"
+description = "A governed cognition framework for AI systems"
+requires-python = ">=3.11"
+license = "MIT"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-cov", "mypy"]
+api = ["fastapi>=0.115", "uvicorn[standard]", "opentelemetry-api", "opentelemetry-sdk"]
+
+[project.scripts]
+alethic = "alethic_kernel.run:main"
+
+[tool.setuptools]
+packages = [
+    "alethic_kernel",
+    "alethic_kernel.alethic",
+    "alethic_kernel.alethic.api",
+    "alethic_kernel.agents",
+    "alethic_kernel.eval",
+    "alethic_kernel.tools",
+    "alethic_kernel.llm",
+    "alethic_kernel.examples",
+]
+
+[tool.setuptools.package-dir]
+"alethic_kernel" = "."
+
+[tool.setuptools.package-data]
+"alethic_kernel" = ["tasks/*.yaml"]
+"alethic_kernel.alethic" = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+pythonpath = ["..", "."]
+
+[tool.mypy]
+strict = true
+mypy_path = ".."
+namespace_packages = true
+explicit_package_bases = true
