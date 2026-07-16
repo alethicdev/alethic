@@ -3,10 +3,11 @@ import json
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, Iterator, List, Optional, cast
 
-from .schema import Record, Provenance, Slot, WriteMode
+from .schema import Record, Provenance, RecordIdConflict, Slot, WriteMode
 from .migrations import migrate
 
 
@@ -48,20 +49,46 @@ class SqliteStore:
 
     def __init__(self, path: str = "blackboard.db") -> None:
         self._path = path
-        self._lock = threading.Lock()
+        # Re-entrant: transaction() holds the lock across the writes inside it,
+        # and each of those writes takes the lock again.
+        self._lock = threading.RLock()
+        self._tx_depth = 0
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         migrate(self._conn)
 
     # ── StoreProtocol ────────────────────────────────────────────────
 
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        with self._lock:
+            self._tx_depth += 1
+            try:
+                yield
+            except BaseException:
+                self._tx_depth -= 1
+                if self._tx_depth == 0:
+                    self._conn.rollback()
+                raise
+            else:
+                self._tx_depth -= 1
+                self._maybe_commit()
+
+    def _maybe_commit(self) -> None:
+        """Defer to the outermost transaction, so its writes land as one unit."""
+        if self._tx_depth == 0:
+            self._conn.commit()
+
     def append(self, rec: Record) -> None:
         with self._lock:
-            self._conn.execute(
-                "INSERT INTO records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                _rec_to_row(rec),
-            )
-            self._conn.commit()
+            try:
+                self._conn.execute(
+                    "INSERT INTO records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    _rec_to_row(rec),
+                )
+            except sqlite3.IntegrityError as e:
+                raise RecordIdConflict(rec.id) from e
+            self._maybe_commit()
 
     def get(self, rec_id: str) -> Optional[Record]:
         with self._lock:
@@ -108,7 +135,7 @@ class SqliteStore:
                 "UPDATE records SET status='INVALIDATED', reason=? WHERE id=?",
                 (reason, rec_id),
             )
-            self._conn.commit()
+            self._maybe_commit()
 
     # ── Extended queries (beyond StoreProtocol) ──────────────────────
 
@@ -158,4 +185,4 @@ class SqliteStore:
                 self._conn.execute(
                     "UPDATE records SET status='EXPIRED', reason='TTL_EXPIRED' "
                     "WHERE id=?", (rec.id,))
-                self._conn.commit()
+                self._maybe_commit()

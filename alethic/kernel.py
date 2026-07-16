@@ -4,7 +4,7 @@ import threading
 from typing import Any, Dict, List, Literal, Optional, Tuple
 import time
 
-from .schema import Record, Provenance, Slot, WriteMode
+from .schema import Record, Provenance, RecordIdConflict, Slot, WriteMode
 from .store import MemoryStore
 from .store_protocol import StoreProtocol
 from .permissions import PERMISSIONS, Role
@@ -12,6 +12,11 @@ from .validators import EvidenceValidator, SymbolicValidator
 
 def _rid(slot: str, n: int, trace_id: str) -> str:
     return f"{slot}:{trace_id}:{n}"
+
+
+# A backstop against spinning forever if a store reports every id as taken.
+# Reached only by a store that is misbehaving, never by a busy trace.
+_MAX_ID_PROBES = 10_000
 
 class Kernel:
     def __init__(self, min_confidence: float = 0.5,
@@ -32,6 +37,7 @@ class Kernel:
             self._counters[key] = self._counters.get(key, 0) + 1
             return _rid(slot, self._counters[key], trace_id)
 
+
     def write(self, role: Role, slot: Slot, mode: WriteMode, kind: str, payload: Dict[str, Any],
               trace_id: str, input_refs: Optional[List[str]] = None, confidence: Optional[float] = None,
               ttl_ms: Optional[int] = None, evidence_refs: Optional[List[str]] = None,
@@ -45,20 +51,34 @@ class Kernel:
         # gate would pass straight through it.
         if confidence is not None and not (0.0 <= confidence <= 1.0):
             raise ValueError(f"confidence must be in [0.0, 1.0], got {confidence!r}")
-        rec_id = self._next_id(slot, trace_id)
-        rec = Record(
-            id=rec_id, slot=slot, mode=mode, kind=kind, payload=payload,
-            prov=Provenance(
-                writer_id=role, trace_id=trace_id,
-                ts_ms=int(time.time() * 1000),
-                input_refs=input_refs or [],
-                confidence=confidence, ttl_ms=ttl_ms,
-            ),
-            evidence_refs=evidence_refs or [],
-            scope=scope,
+        # Counters live in this process while the store may outlive it, so the
+        # store can already hold `beliefs:order-123:1` — written by an earlier
+        # run against the same database, or by another kernel sharing it. Walk
+        # forward until an id is free rather than colliding on the primary key.
+        # Each pass takes the next counter value, so this converges on the
+        # records already under this trace.
+        for _ in range(_MAX_ID_PROBES):
+            rec = Record(
+                id=self._next_id(slot, trace_id),
+                slot=slot, mode=mode, kind=kind, payload=payload,
+                prov=Provenance(
+                    writer_id=role, trace_id=trace_id,
+                    ts_ms=int(time.time() * 1000),
+                    input_refs=input_refs or [],
+                    confidence=confidence, ttl_ms=ttl_ms,
+                ),
+                evidence_refs=evidence_refs or [],
+                scope=scope,
+            )
+            try:
+                self.store.append(rec)
+                return rec
+            except RecordIdConflict:
+                continue
+        raise RuntimeError(
+            f"could not allocate a record id for {slot}:{trace_id} after "
+            f"{_MAX_ID_PROBES} attempts"
         )
-        self.store.append(rec)
-        return rec
 
     def current_view(self, trace_id: str,
                      include_persistent: bool = False) -> Dict[str, Dict[str, Any]]:
@@ -125,19 +145,22 @@ class Kernel:
                 if dep_rec and dep_rec.prov.confidence is not None:
                     checks.append("confidence")
                     break
-            ev_rec = self.write(
-                "evidence_validator", "evidence", "COMMIT",
-                f"validation_{prop.kind}",
-                {"belief": prop.kind, "result": "pass", "checks": checks},
-                trace_id,
-            )
-
-            self.store.invalidate(proposal_id, "SUPERSEDED_BY_COMMIT")
-            self.write(
-                "kernel", "beliefs", "COMMIT", prop.kind, prop.payload, trace_id,
-                input_refs=prop.prov.input_refs, confidence=prop.prov.confidence,
-                evidence_refs=[ev_rec.id],
-            )
+            # One unit: evidence saying validation passed must not outlive the
+            # belief it vouches for, and the proposal must stay retryable unless
+            # the belief actually lands.
+            with self.store.transaction():
+                ev_rec = self.write(
+                    "evidence_validator", "evidence", "COMMIT",
+                    f"validation_{prop.kind}",
+                    {"belief": prop.kind, "result": "pass", "checks": checks},
+                    trace_id,
+                )
+                self.store.invalidate(proposal_id, "SUPERSEDED_BY_COMMIT")
+                self.write(
+                    "kernel", "beliefs", "COMMIT", prop.kind, prop.payload, trace_id,
+                    input_refs=prop.prov.input_refs, confidence=prop.prov.confidence,
+                    evidence_refs=[ev_rec.id],
+                )
             return True, "COMMITTED"
 
     # ── plan feasibility check ──────────────────────────────────────────
@@ -188,12 +211,13 @@ class Kernel:
                     self.store.invalidate(proposal_id,
                                           f"Prediction requires missing belief: {dep}")
                     return False, "PREDICTION_MISSING_BELIEF"
-            self.store.invalidate(proposal_id, "SUPERSEDED_BY_COMMIT")
-            self.write(
-                "kernel", "predictions", "COMMIT", prop.kind, prop.payload,
-                trace_id, input_refs=prop.prov.input_refs,
-                confidence=prop.prov.confidence,
-            )
+            with self.store.transaction():
+                self.store.invalidate(proposal_id, "SUPERSEDED_BY_COMMIT")
+                self.write(
+                    "kernel", "predictions", "COMMIT", prop.kind, prop.payload,
+                    trace_id, input_refs=prop.prov.input_refs,
+                    confidence=prop.prov.confidence,
+                )
             return True, "COMMITTED"
 
     # ── action commitment with symbolic validation ──────────────────────
@@ -228,9 +252,10 @@ class Kernel:
             if not res.ok:
                 self.store.invalidate(proposal_id, res.detail)
                 return False, res.code
-            self.store.invalidate(proposal_id, "SUPERSEDED_BY_COMMIT")
-            self.write(
-                "kernel", "actions", "COMMIT", prop.kind, prop.payload, trace_id,
-                input_refs=prop.prov.input_refs, confidence=prop.prov.confidence,
-            )
+            with self.store.transaction():
+                self.store.invalidate(proposal_id, "SUPERSEDED_BY_COMMIT")
+                self.write(
+                    "kernel", "actions", "COMMIT", prop.kind, prop.payload, trace_id,
+                    input_refs=prop.prov.input_refs, confidence=prop.prov.confidence,
+                )
             return True, "COMMITTED"
