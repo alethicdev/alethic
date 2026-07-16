@@ -89,17 +89,18 @@ class SqliteStore:
             cur = self._conn.execute(
                 "SELECT * FROM records "
                 "WHERE slot=? AND kind=? AND trace_id=? AND status='ACTIVE' "
-                "ORDER BY ts_ms ASC LIMIT 1",
+                "ORDER BY ts_ms ASC",
                 (slot, kind, trace_id),
             )
-            row = cur.fetchone()
-            if row is None:
-                return None
-            rec = _row_to_rec(row)
-            self._check_ttl(rec)
-            if rec.status != "ACTIVE":
-                return None
-            return rec
+            # TTL is evaluated lazily on read, so a row still marked ACTIVE may
+            # in fact have expired. Walk the candidates rather than judging only
+            # the oldest, or an expired record hides the live one behind it.
+            for row in cur.fetchall():
+                rec = _row_to_rec(row)
+                self._check_ttl(rec)
+                if rec.status == "ACTIVE":
+                    return rec
+            return None
 
     def invalidate(self, rec_id: str, reason: str) -> None:
         with self._lock:
