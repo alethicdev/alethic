@@ -10,9 +10,21 @@ from alethic_kernel.tools.payment_tool import PaymentTool
 from alethic_kernel.tools.refund_tool import RefundTool
 
 
-@pytest.fixture
-def kernel() -> Kernel:
-    return Kernel()
+@pytest.fixture(params=["memory", "sqlite"])
+def kernel(request, tmp_path) -> Kernel:
+    """Run every governance assertion against both stores.
+
+    The two backends must agree: which store is configured is a deployment
+    choice and must never change whether a proposal is committed or refused.
+    """
+    if request.param == "memory":
+        yield Kernel()
+        return
+    store = SqliteStore(str(tmp_path / "kernel.db"))
+    try:
+        yield Kernel(store=store)
+    finally:
+        store.close()
 
 
 @pytest.fixture
@@ -25,6 +37,19 @@ def sqlite_store(tmp_path) -> SqliteStore:
     store = SqliteStore(str(tmp_path / "test.db"))
     yield store
     store.close()
+
+
+@pytest.fixture(params=["memory", "sqlite"])
+def store(request, tmp_path):
+    """Both StoreProtocol implementations, for tests that must hold on either."""
+    if request.param == "memory":
+        yield MemoryStore()
+        return
+    s = SqliteStore(str(tmp_path / "store.db"))
+    try:
+        yield s
+    finally:
+        s.close()
 
 
 @pytest.fixture
