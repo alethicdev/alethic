@@ -5,6 +5,15 @@ from typing import Any, Dict, List, Optional, Literal
 Slot = Literal["percepts","beliefs","constraints","plans","evidence","predictions","actions"]
 WriteMode = Literal["PROPOSE","COMMIT"]
 
+
+class RecordIdConflict(Exception):
+    """A record with this id already exists.
+
+    Records are an append-only audit trail, so a store must refuse to replace
+    one rather than silently overwrite it. Raised by every store so callers can
+    react without knowing which backend they hold.
+    """
+
 @dataclass
 class Provenance:
     writer_id: str
