@@ -31,8 +31,8 @@ Repository = "https://github.com/emiluzelac/alethic.git"
 "Research Paper" = "https://doi.org/10.5281/zenodo.18691808"
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-cov", "mypy"]
-api = ["fastapi>=0.115", "uvicorn[standard]", "opentelemetry-api", "opentelemetry-sdk"]
+dev = ["pytest>=8.0", "pytest-cov", "mypy", "httpx"]
+api = ["fastapi>=0.115", "uvicorn[standard]", "opentelemetry-api", "opentelemetry-sdk", "httpx2"]
 
 [project.scripts]
 alethic = "alethic_kernel.run:main"
