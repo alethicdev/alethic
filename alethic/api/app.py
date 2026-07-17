@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError, version as _dist_version
 from typing import Any, AsyncGenerator
 
 from fastapi import FastAPI, Request
@@ -11,6 +12,13 @@ from fastapi.responses import JSONResponse
 
 from .routes import router
 from .dependencies import reset_shared_state
+
+
+def _pkg_version() -> str:
+    try:
+        return _dist_version("alethic-kernel")
+    except PackageNotFoundError:  # running from a source tree, not installed
+        return "0.0.0.dev0"
 
 
 def _json_safe(value: Any) -> Any:
@@ -46,7 +54,10 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Alethic Kernel API",
         description="Domain-agnostic AI governance kernel",
-        version="0.1.0",
+        # Read from the installed package rather than repeated here: a hardcoded
+        # copy means /openapi.json keeps reporting the old version after a bump,
+        # and a version that lies is worse than one that is merely absent.
+        version=_pkg_version(),
         lifespan=lifespan,
     )
     app.add_exception_handler(RequestValidationError, _validation_error_handler)  # type: ignore[arg-type]
